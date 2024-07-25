@@ -20,6 +20,18 @@ provider "kubernetes" {
   }
 }
 
+provider "kubectl" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    args        = ["eks", "get-token", "--cluster-name", local.name, "--region", local.region]
+    command     = "aws"
+  }
+  load_config_file  = false
+  apply_retry_count = 15
+}
+
 provider "helm" {
   kubernetes {
     host                   = module.eks.cluster_endpoint
@@ -39,6 +51,7 @@ data "aws_ecrpublic_authorization_token" "token" {
 }
 
 data "aws_availability_zones" "available" {}
+data "aws_caller_identity" "current" {}
 
 locals {
   name   = "ex-${basename(path.cwd)}"
@@ -162,6 +175,36 @@ resource "aws_eks_access_entry" "karpenter_node_access_entry" {
   principal_arn     = module.eks_blueprints_addons.karpenter.node_iam_role_arn
   kubernetes_groups = []
   type              = "EC2_LINUX"
+}
+
+
+################################################################################
+# Crossplane
+################################################################################
+
+module "crossplane" {
+  source  = "aws-ia/eks-blueprints-addon/aws"
+  version = "1.1.1"
+
+  name             = "crossplane"
+  description      = "A Helm chart to deploy crossplane project"
+  namespace        = "crossplane-system"
+  create_namespace = true
+  chart            = "crossplane"
+  chart_version    = "1.16.0"
+  repository       = "https://charts.crossplane.io/stable/"
+  timeout          = "600"
+  values           = [file("${path.module}/crossplane.yaml")]
+}
+
+resource "kubectl_manifest" "environmentconfig" {
+  yaml_body = templatefile("${path.module}/environmentconfig.yaml", {
+    awsAccountID = data.aws_caller_identity.current.account_id
+    eksOIDC      = module.eks.oidc_provider
+    vpcID        = module.vpc.vpc_id
+  })
+
+  depends_on = [module.crossplane]
 }
 
 ################################################################################
